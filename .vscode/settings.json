@@ -2,7 +2,7 @@
   "nrf-connect.topdir": "f:\\nrf-sdk\\ncs\\v1.7.0",
   "nrf-connect.toolchain.path": "f:\\nrf-sdk\\ncs\\v1.7.0\\toolchain",
   "nrf-connect.applications": [
-    "f:\\nrf-sdk\\projeler\\zephyr_sec_lev4_rssi"
+    "c:\\Users\\quad2\\Desktop\\ci_test\\feature\\zephyr_l4_fac_res"
   ],
   "kconfig.zephyr.west": "f:\\nrf-sdk\\ncs\\v1.7.0\\toolchain\\opt\\bin\\Scripts\\west.exe",
   "kconfig.zephyr.base": "f:\\nrf-sdk\\ncs\\v1.7.0\\zephyr",

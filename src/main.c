@@ -39,7 +39,9 @@ static bool button_press = false;
 
 struct bt_conn *default_conn;
 
-int sampling = 0;
+// RSSI samplimg
+int8_t sampling = 0;
+struct k_work_delayable rssi_timer;
 
 static const struct bt_data ad[] = {
 		BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -63,11 +65,19 @@ static void auth_confirm(struct bt_conn *conn, unsigned int passkey)
 	snprintk(passkey_str, 7, "%06u", passkey);
 	printk("\nConfirm passkey for %s: %s\n\n", addr, passkey_str);
 	printk("Automatic confirm passkey\n"); // I will add RSSI check for future developments
-	if(paired == false)
+	int rssi = get_rssi();
+	if(rssi == 127 || rssi <-60){
+		printk("Central is not close to the peripheral\n");
+		bt_conn_disconnect(default_conn, BT_CONN_LE_OPT_NONE);
+	}
+	else
 	{
-		printk("User indicated YES\n");
-		bt_conn_auth_passkey_confirm(default_conn);
-		paired = true;
+		if(paired == false)
+		{
+			printk("User indicated YES\n");
+			bt_conn_auth_passkey_confirm(default_conn);
+			paired = true;
+		}
 	}
 }
 
@@ -84,6 +94,25 @@ static struct bt_conn_auth_cb pairing_cb_display = {
 		.cancel = pairing_cancel,
 };
 
+ 
+static void rssi_polling(struct k_work *work)
+{
+	read_rssi();
+	// and again in a second....
+	if (sampling == 1) {
+	  k_work_schedule(&rssi_timer, K_SECONDS(1));
+	}
+
+}
+
+static void start_sampling_rssi()
+{
+	printk("starting RSSI sampling\n");
+	sampling = 1;
+    k_work_init_delayable(&rssi_timer, rssi_polling);
+	k_work_schedule(&rssi_timer, K_SECONDS(1));
+}
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err)
@@ -96,7 +125,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		default_conn = bt_conn_ref(conn);
 		int rc = bt_conn_set_security(default_conn, BT_SECURITY_L4);
 		printk("requested security level 4 [%d]\n",rc);
-    	// start_sampling_rssi();
+		start_sampling_rssi();
 	}
 }
 
@@ -107,7 +136,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		printk("Disconnected\n");
 		bt_conn_unref(default_conn);
 		default_conn = NULL;
-    	// sampling = 0;
+    	sampling = 0;
 	}
 }
 
@@ -190,9 +219,7 @@ void my_timer_handler(struct k_timer *dummy)
 	if( val == 0){
 		clear_all_bonds();	
 		gpio_pin_toggle(my_gpio_port,LED1_PIN);
-		k_msleep(1000);
 		__NVIC_SystemReset();
-		k_msleep(100);
 	}  
 	button_press = false; 
 }
