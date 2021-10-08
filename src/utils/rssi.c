@@ -32,6 +32,6 @@ void read_rssi()
 	} else {
 	    rssi = rsp->data[3];
 	}
-	printk("RSSI: %01hhd \n",rssi);
+	printk("RSSI: %01d \n",rssi);
     net_buf_unref(rsp);
 }
