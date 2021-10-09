@@ -6,18 +6,23 @@
 #include <utils/rssi.h>
 
 int8_t rssi = 0;
+uint16_t conn_handle;
 
 int8_t get_rssi() {
   return rssi;
 }
 
-void read_rssi()
+void read_rssi(struct bt_conn *conn)
 {
 	struct net_buf *rsp;
 	struct net_buf *command;
 	int err;
 
-	uint16_t conn_handle = 0; // connection handle is always zero and is not accessible in bt_conn anyway
+	err = bt_hci_get_conn_handle(conn, &conn_handle);
+	if (err) {
+			printk("No connection handle (err %d)\n", err);
+	}
+	// uint16_t conn_handle = 0; // connection handle is always zero and is not accessible in bt_conn anyway
 	command = bt_hci_cmd_create(BT_HCI_OP_READ_RSSI, 2);
 	if (!command) {
 		printk("No HCI command buffer!\n");
@@ -30,8 +35,8 @@ void read_rssi()
 		printk("HCI command failed (err %d)\n", err);
 		rssi = -127;
 	} else {
-	    rssi = rsp->data[3];
+	    rssi = (int8_t) rsp->data[3];
 	}
-	printk("RSSI: %01d \n",rssi);
+	printk("RSSI: %d db \n",rssi);
     net_buf_unref(rsp);
 }
