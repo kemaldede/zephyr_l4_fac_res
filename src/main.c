@@ -41,7 +41,7 @@ struct bt_conn *default_conn;
 
 // RSSI samplimg
 int8_t sampling = 0;
-struct k_work_delayable rssi_timer;
+struct k_work_delayable rssi_timer_work;
 struct k_work_delayable auth_confirm_work;
 
 static const struct bt_data ad[] = {
@@ -72,7 +72,7 @@ static void auth_confirm(struct bt_conn *conn, unsigned int passkey)
 		printk("Central is not close to the peripheral\n");
 		bt_conn_auth_cancel(default_conn);
 		bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		default_conn = NULL;
+		// default_conn = NULL;
 	}
 	else
 	{
@@ -81,6 +81,7 @@ static void auth_confirm(struct bt_conn *conn, unsigned int passkey)
 			printk("User indicated YES\n");
 			bt_conn_auth_passkey_confirm(default_conn);
 			paired = true;
+			k_work_cancel_delayable(&rssi_timer_work);
 		}
 	}
 }
@@ -105,7 +106,7 @@ static void rssi_polling(struct k_work *work)
 		read_rssi(default_conn);
 		// and again in a second....
 		if (sampling == 1) {
-		k_work_schedule(&rssi_timer, K_SECONDS(1));
+		k_work_schedule(&rssi_timer_work, K_SECONDS(1));
 		}
 	}
 }
@@ -114,8 +115,8 @@ static void start_sampling_rssi()
 {
 	printk("starting RSSI sampling\n");
 	sampling = 1;
-    k_work_init_delayable(&rssi_timer, rssi_polling);
-	k_work_schedule(&rssi_timer, K_SECONDS(1));
+    k_work_init_delayable(&rssi_timer_work, rssi_polling);
+	k_work_schedule(&rssi_timer_work, K_SECONDS(1));
 }
 
 static void connected(struct bt_conn *conn, uint8_t err)
@@ -130,7 +131,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		default_conn = bt_conn_ref(conn);
 		int rc = bt_conn_set_security(default_conn, BT_SECURITY_L4);
 		printk("requested security level 4 [%d]\n",rc);
-		start_sampling_rssi();
+		if(paired == false)
+		{
+			start_sampling_rssi();
+		}	
 	}
 }
 
