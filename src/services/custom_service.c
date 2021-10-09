@@ -45,14 +45,14 @@ ssize_t write_input(struct bt_conn *conn,
 {
 
     // TODO authorisation check - only allow writes when the Central and (this) Peripheral device are nice and close to each other
-	printk("Checking RSSI\n");
-	int8_t rssi = get_rssi();
-	printk("RSSI: %01hhd \n",rssi);
-	if (rssi < -50) 
-	{
-		printk("devices not close enough – requested operation not authorized\n");
-		return BT_GATT_ERR(BT_ATT_ERR_AUTHORIZATION);
-	}
+	// printk("Checking RSSI\n");
+	// int8_t rssi = get_rssi();
+	// printk("RSSI: %01hhd \n",rssi);
+	// if (rssi < -50) 
+	// {
+	// 	printk("devices not close enough – requested operation not authorized\n");
+	// 	return BT_GATT_ERR(BT_ATT_ERR_AUTHORIZATION);
+	// }
 
 	const uint8_t *new_number = buf;
 	if (!len)

@@ -42,6 +42,7 @@ struct bt_conn *default_conn;
 // RSSI samplimg
 int8_t sampling = 0;
 struct k_work_delayable rssi_timer;
+struct k_work_delayable auth_confirm_work;
 
 static const struct bt_data ad[] = {
 		BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -66,9 +67,12 @@ static void auth_confirm(struct bt_conn *conn, unsigned int passkey)
 	printk("\nConfirm passkey for %s: %s\n\n", addr, passkey_str);
 	printk("Automatic confirm passkey\n"); // I will add RSSI check for future developments
 	int rssi = get_rssi();
-	if(rssi == 127 || rssi <-60){
+	if(rssi <-60)
+	{
 		printk("Central is not close to the peripheral\n");
-		bt_conn_disconnect(default_conn, BT_CONN_LE_OPT_NONE);
+		bt_conn_auth_cancel(default_conn);
+		bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		default_conn = NULL;
 	}
 	else
 	{
@@ -97,12 +101,13 @@ static struct bt_conn_auth_cb pairing_cb_display = {
  
 static void rssi_polling(struct k_work *work)
 {
-	read_rssi();
-	// and again in a second....
-	if (sampling == 1) {
-	  k_work_schedule(&rssi_timer, K_SECONDS(1));
+	if(default_conn != NULL){
+		read_rssi(default_conn);
+		// and again in a second....
+		if (sampling == 1) {
+		k_work_schedule(&rssi_timer, K_SECONDS(1));
+		}
 	}
-
 }
 
 static void start_sampling_rssi()
