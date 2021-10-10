@@ -1,0 +1,568 @@
+name: Containers
+
+env:
+  zephyr-version: 2.5.0
+  zephyr-sdk-version: 0.12.4
+  sha-abbrev-length: 12
+  no-cache: ${{ secrets.NO_CACHE != null || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+  ignore-actions-cache: ${{ secrets.IGNORE_ACTIONS_CACHE != null }}
+  run-unit-tests: ${{ secrets.RUN_UNIT_TESTS != null }}
+  docker-hub-credentials: ${{ secrets.DOCKER_HUB_USERNAME != null && secrets.DOCKER_HUB_TOKEN != null }}
+  ghcr-credentials: ${{ secrets.GHCR_USERNAME != null && secrets.GHCR_TOKEN != null }}
+  docker-hub-namespace: ${{ secrets.DOCKER_HUB_NAMESPACE || github.repository_owner }}
+  docker-hub-namespace-upstream: ${{ secrets.DOCKER_HUB_NAMESPACE_UPSTREAM || 'zmkfirmware' }}
+  ghcr-namespace: ${{ github.repository_owner }}
+  zmk-repository: ${{ secrets.ZMK_REPOSITORY || 'zmkfirmware/zmk' }}
+  zmk-ref: ${{ secrets.ZMK_REF || 'main' }}
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *' # every day at 02:00 UTC
+
+concurrency: ${{ github.ref }}/${{ github.workflow }}
+
+jobs:
+  timestamp:
+    runs-on: ubuntu-latest
+    outputs:
+      timestamp: ${{ steps.timestamp.outputs.timestamp }}
+    steps:
+      - name: Timestamp
+        id: timestamp
+        run: echo ::set-output name=timestamp::$(date +%Y%m%d%H%M%S)
+  architectures:
+    runs-on: ubuntu-latest
+    outputs:
+      json: ${{ steps.import.outputs.json }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Import from architectures.yml
+        id: import
+        shell: python
+        run: |
+          import yaml, json
+          with open('architectures.yml', 'r') as file:
+            architectures = yaml.safe_load(file)
+            print('::set-output name=json::' + json.dumps(architectures))
+  tags:
+    needs:
+      - timestamp
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.definitions.outputs.branch }}
+      base: ${{ steps.definitions.outputs.base }}
+      candidate: ${{ steps.definitions.outputs.candidate }}
+      versions: ${{ steps.definitions.outputs.versions }} # e.g. 2.4.0-0.11.4
+      major-minor: ${{ steps.definitions.outputs.major-minor }} # e.g. 2.4
+      major-minor-branch: ${{ steps.definitions.outputs.major-minor-branch }} # e.g. 2.4-branch
+    steps:
+      - name: Definitions
+        id: definitions
+        env:
+          TIMESTAMP: ${{ needs.timestamp.outputs.timestamp }}
+          SHA: ${{ github.sha }}
+          SHA_ABBREV_LENGTH: ${{ env.sha-abbrev-length }}
+          RUN_ID: ${{ github.run_id }}
+          ZEPHYR_VERSION: ${{ env.zephyr-version }}
+          ZEPHYR_SDK_VERSION: ${{ env.zephyr-sdk-version }}
+        run: |
+          BRANCH=${GITHUB_REF#refs/heads/}
+          BRANCH=${BRANCH//[^A-Za-z0-9_.-]/_} # Substitutes invalid Docker tag characters
+          BASE=${GITHUB_BASE_REF//[^A-Za-z0-9_.-]/_} # Substitutes invalid Docker tag characters
+          SHA=${SHA:0:${SHA_ABBREV_LENGTH}}
+          CANDIDATE=${BRANCH}-${TIMESTAMP}-${ZEPHYR_VERSION}-${ZEPHYR_SDK_VERSION}-${SHA}-${RUN_ID}
+          VERSIONS=${ZEPHYR_VERSION}-${ZEPHYR_SDK_VERSION}
+          MAJOR=$(echo ${ZEPHYR_VERSION} | cut -d'.' -f 1)
+          MINOR=$(echo ${ZEPHYR_VERSION} | cut -d'.' -f 2)
+          MAJOR_MINOR=${MAJOR}.${MINOR}
+          MAJOR_MINOR_BRANCH=${MAJOR_MINOR}-branch
+          echo ::set-output name=branch::${BRANCH}
+          echo ::set-output name=base::${BASE}
+          echo ::set-output name=candidate::${CANDIDATE}
+          echo ::set-output name=versions::${VERSIONS}
+          echo ::set-output name=major-minor::${MAJOR_MINOR}
+          echo ::set-output name=major-minor-branch::${MAJOR_MINOR_BRANCH}
+  dev-generic:
+    needs:
+      - timestamp
+      - tags
+    if: ${{ !startsWith(github.ref, 'refs/tags') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to Docker Hub
+        id: docker-hub-login
+        if: ${{ env.docker-hub-credentials == 'true' }}
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      - name: Login to GitHub Container Registry
+        id: ghcr-login
+        if: ${{ env.ghcr-credentials == 'true' }}
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USERNAME }}
+          password: ${{ secrets.GHCR_TOKEN }}
+      - name: Define paths
+        id: paths
+        env:
+          NS: ${{ env.docker-hub-namespace }}
+          NSU: ${{ env.docker-hub-namespace-upstream }}
+          REPOSITORY: zmk-dev-generic
+          BRANCH: ${{ needs.tags.outputs.branch }}
+          BASE: ${{ needs.tags.outputs.base }}
+          MAJOR_MINOR_BRANCH: ${{ needs.tags.outputs.major-minor-branch }}
+        run: |
+          echo ::set-output name=local::/tmp/.buildx/dev-generic
+          echo ::set-output name=local-new::/tmp/.buildx/dev-generic-new
+          echo ::set-output name=branch::docker.io/${NS}/${REPOSITORY}:${BRANCH}
+          if [ ! -z "$BASE" ]; then
+            echo ::set-output name=base::docker.io/${NS}/${REPOSITORY}:${BASE}
+          fi
+          echo ::set-output name=major-minor-branch::docker.io/${NS}/${REPOSITORY}:${MAJOR_MINOR_BRANCH}
+          echo ::set-output name=branch-upstream::docker.io/${NSU}/${REPOSITORY}:${BRANCH}
+          echo ::set-output name=major-minor-branch-upstream::docker.io/${NSU}/${REPOSITORY}:${MAJOR_MINOR_BRANCH}
+      - name: Set up cache
+        id: cache
+        uses: actions/cache@v2
+        env:
+          cache-name: dev-generic
+        with:
+          path: ${{ steps.paths.outputs.local }}
+          key: ${{ runner.os }}/${{ env.cache-name }}/${{ github.run_id }}/${{ needs.timestamp.outputs.timestamp }}
+          restore-keys: |
+            ${{ runner.os }}/${{ env.cache-name }}/${{ github.run_id }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      - name: Build to local cache
+        uses: docker/build-push-action@v2
+        with:
+          target: dev-generic
+          build-args: |
+            ZEPHYR_VERSION=${{ env.zephyr-version }}
+          no-cache: ${{ env.no-cache == 'true' }}
+          cache-from: |
+            ${{ (env.ignore-actions-cache == 'false') && format('type=local,src={0}', steps.paths.outputs.local) || '' }}
+            type=registry,ref=${{ steps.paths.outputs.branch }}
+            ${{ (steps.paths.outputs.base != '') && format('type=registry,ref={0}', steps.paths.outputs.base) || '' }}
+            type=registry,ref=${{ steps.paths.outputs.major-minor-branch }}
+            type=registry,ref=${{ steps.paths.outputs.branch-upstream }}
+            type=registry,ref=${{ steps.paths.outputs.major-minor-branch-upstream }}
+          cache-to: type=local,dest=${{ steps.paths.outputs.local-new }},mode=max
+      - name: Push to registry cache
+        if: ${{ env.docker-hub-credentials == 'true' }}
+        uses: docker/build-push-action@v2
+        with:
+          target: dev-generic
+          build-args: |
+            ZEPHYR_VERSION=${{ env.zephyr-version }}
+          tags: |
+            ${{ steps.paths.outputs.branch }}
+          cache-from: type=local,src=${{ steps.paths.outputs.local-new }}
+          cache-to: type=inline
+          push: true
+      # Workaround to stop the dev-generic cache ballooning ...
+      # https://github.com/docker/build-push-action/issues/252
+      # https://github.com/moby/buildkit/issues/1896
+      - name: Switch local cache
+        run: |
+          rm -rf ${{ steps.paths.outputs.local }}
+          mv ${{ steps.paths.outputs.local-new }} ${{ steps.paths.outputs.local }}
+  candidates:
+    needs:
+      - timestamp
+      - architectures
+      - tags
+      - dev-generic
+    if: ${{ !startsWith(github.ref, 'refs/tags') }}
+    runs-on: ubuntu-latest
+    env:
+      docker-args: --rm --workdir /github/workspace -v /var/run/docker.sock:/var/run/docker.sock -v /home/runner/work/_temp:/home/runner/work/_temp -v /home/runner/work/_temp/_github_home:/github/home -v /home/runner/work/_temp/_github_workflow:/github/workflow -v /home/runner/work/_temp/_runner_file_commands:/github/file_commands -v ${{ github.workspace }}:/github/workspace
+    defaults:
+      run:
+        shell: /usr/bin/docker exec candidate /bin/bash {0}
+    strategy:
+      fail-fast: false
+      matrix: 
+        architecture: ${{ fromJSON(needs.architectures.outputs.json) }}
+        include:
+          - architecture: arm
+            board: nice_nano
+            shield: qaz
+    steps:
+      - name: Login to Docker Hub
+        id: docker-hub-login
+        if: ${{ env.docker-hub-credentials == 'true' }}
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      - name: Login to GitHub Container Registry
+        id: ghcr-login
+        if: ${{ env.ghcr-credentials == 'true' }}
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USERNAME }}
+          password: ${{ secrets.GHCR_TOKEN }}
+      - name: Define repositories
+        id: repositories
+        shell: bash
+        run: |
+          echo ::set-output name=build::zmk-build-${{ matrix.architecture }}
+          echo ::set-output name=dev::zmk-dev-${{ matrix.architecture }}
+      - name: Define paths
+        id: paths
+        shell: bash
+        env:
+          NS: ${{ env.docker-hub-namespace }}
+          NSU: ${{ env.docker-hub-namespace-upstream }}
+          BUILD: ${{ steps.repositories.outputs.build }}
+          DEV: ${{ steps.repositories.outputs.dev }}
+          CANDIDATE: ${{ needs.tags.outputs.candidate }}
+          BRANCH: ${{ needs.tags.outputs.branch }}
+          BASE: ${{ needs.tags.outputs.base }}
+          MAJOR_MINOR_BRANCH: ${{ needs.tags.outputs.major-minor-branch }}
+        run: |
+          echo ::set-output name=dev-generic::/tmp/.buildx/dev-generic
+          echo ::set-output name=build-candidate::docker.io/${NS}/${BUILD}:${CANDIDATE}
+          echo ::set-output name=build-branch::docker.io/${NS}/${BUILD}:${BRANCH}
+          if [ ! -z "$BASE" ]; then
+            echo ::set-output name=build-base::docker.io/${NS}/${BUILD}:${BASE}
+          fi
+          echo ::set-output name=build-major-minor-branch::docker.io/${NS}/${BUILD}:${MAJOR_MINOR_BRANCH}
+          echo ::set-output name=build-branch-upstream::docker.io/${NSU}/${BUILD}:${BRANCH}
+          echo ::set-output name=build-major-minor-branch-upstream::docker.io/${NSU}/${BUILD}:${MAJOR_MINOR_BRANCH}
+          echo ::set-output name=dev-candidate::docker.io/${NS}/${DEV}:${CANDIDATE}
+          echo ::set-output name=dev-branch::docker.io/${NS}/${DEV}:${BRANCH}
+          if [ ! -z "$BASE" ]; then
+            echo ::set-output name=dev-base::docker.io/${NS}/${DEV}:${BASE}
+          fi
+          echo ::set-output name=dev-major-minor-branch::docker.io/${NS}/${DEV}:${MAJOR_MINOR_BRANCH}
+          echo ::set-output name=dev-branch-upstream::docker.io/${NSU}/${DEV}:${BRANCH}
+          echo ::set-output name=dev-major-minor-branch-upstream::docker.io/${NSU}/${DEV}:${MAJOR_MINOR_BRANCH}
+      - name: Define build-args
+        id: build-args
+        shell: bash
+        run: |
+          LIST="
+            ZEPHYR_VERSION=${{ env.zephyr-version }}
+            ARCHITECTURE=${{ matrix.architecture }}
+            ZEPHYR_SDK_VERSION=${{ env.zephyr-sdk-version }}
+          "
+          # Escapes %, \n and \r
+          # See: https://github.community/t/set-output-truncates-multiline-strings/16852
+          LIST="${LIST//'%'/'%25'}"
+          LIST="${LIST//$'\n'/'%0A'}"
+          LIST="${LIST//$'\r'/'%0D'}"
+          echo ::set-output name=list::${LIST}
+      - name: Define labels
+        id: labels
+        shell: bash
+        run: |
+          LIST="
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          "
+          # Escapes %, \n and \r
+          # See: https://github.community/t/set-output-truncates-multiline-strings/16852
+          LIST="${LIST//'%'/'%25'}"
+          LIST="${LIST//$'\n'/'%0A'}"
+          LIST="${LIST//$'\r'/'%0D'}"
+          echo ::set-output name=list::${LIST}
+      - name: Set up dev-generic cache
+        id: dev-generic-cache
+        uses: actions/cache@v2
+        env:
+          cache-name: dev-generic
+        with:
+          path: ${{ steps.paths.outputs.dev-generic }}
+          key: ${{ runner.os }}/${{ env.cache-name }}/${{ github.run_id }}/${{ needs.timestamp.outputs.timestamp }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      - name: Build and load 'build' candidate image
+        uses: docker/build-push-action@v2
+        with:
+          target: build
+          build-args: |
+            ${{ steps.build-args.outputs.list }}
+          labels: |
+            ${{ steps.labels.outputs.list }}
+          tags: |
+            ${{ steps.paths.outputs.build-candidate }}
+            ${{ steps.paths.outputs.build-branch }}
+          cache-from: |
+            type=local,src=${{ steps.paths.outputs.dev-generic }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.build-candidate) }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.build-branch) }}
+            ${{ (env.no-cache == 'false') && (steps.paths.outputs.build-base != '') && format('type=registry,ref={0}', steps.paths.outputs.build-base) || '' }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.build-major-minor-branch) }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.build-branch-upstream) }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.build-major-minor-branch-upstream) }}
+          cache-to: type=inline
+          load: true
+      - name: Build and load 'dev' candidate image
+        uses: docker/build-push-action@v2
+        with:
+          target: dev
+          build-args: |
+            ${{ steps.build-args.outputs.list }}
+          labels: |
+            ${{ steps.labels.outputs.list }}
+          tags: |
+            ${{ steps.paths.outputs.dev-candidate }}
+            ${{ steps.paths.outputs.dev-branch }}
+          cache-from: |
+            type=registry,ref=${{ steps.paths.outputs.build-candidate }}
+            type=local,src=${{ steps.paths.outputs.dev-generic }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.dev-candidate) }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.dev-branch) }}
+            ${{ (env.no-cache == 'false') && (steps.paths.outputs.dev-base != '') && format('type=registry,ref={0}', steps.paths.outputs.dev-base) || '' }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.dev-major-minor-branch) }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.dev-branch-upstream) }}
+            ${{ (env.no-cache == 'false') && format('type=registry,ref={0}', steps.paths.outputs.dev-major-minor-branch-upstream) }}
+          cache-to: type=inline
+          load: true
+      - name: Checkout ZMK
+        uses: actions/checkout@v2
+        with:
+          repository: ${{ env.zmk-repository }}
+          ref: ${{ env.zmk-ref }}
+      - name: Cache Zephyr modules
+        uses: actions/cache@v2
+        env:
+          cache-name: zephyr-modules
+        with:
+          path: |
+            modules/
+            tools/
+            zephyr/
+            bootloader/
+          key: ${{ runner.os }}/${{ env.cache-name }}/${{ hashFiles('app/west.yml') }}
+          restore-keys: |
+            ${{ runner.os }}/${{ env.cache-name }}/
+      - name: Create and run container from 'build' candidate image
+        shell: bash
+        run: docker run -d -it --name candidate ${{ env.docker-args }} ${{ steps.paths.outputs.build-candidate }}
+      - name: Test cmake
+        run: cmake --version
+      - name: Test python
+        run: python3 --version
+      - name: Test diff
+        run: diff --version
+      - name: Test west init
+        run: west init -l app
+      - name: Test west update
+        run: west update
+      - name: Test west zephyr-export
+        run: west zephyr-export
+      - name: Test board/shield (west build)
+        id: board-shield
+        if: ${{ matrix.board != null }}
+        run: west build -s app -b ${{ matrix.board }} -- ${{ matrix.shield != null && format('-DSHIELD={0}', matrix.shield) || null }}
+      - name: Test RAM report (west build)
+        if: ${{ steps.board-shield.outcome == 'success' }}
+        run: west build -t ram_report
+      - name: Test ROM report (west build)
+        if: ${{ steps.board-shield.outcome == 'success' }}
+        run: west build -t rom_report
+      - name: Test west test (single)
+        run: west test tests/none/normal
+      - name: Test west test (full)
+        if: ${{ env.run-unit-tests == 'true' }}
+        run: west test
+      - name: Test clean (west build)
+        if: ${{ steps.board-shield.outcome == 'success' }}
+        run: west build -t clean
+      - name: Stop container
+        shell: bash
+        run: docker stop candidate
+      - name: Create and run container from 'dev' candidate image
+        shell: bash
+        run: docker run -d -it --name candidate ${{ env.docker-args }} ${{ steps.paths.outputs.dev-candidate }}
+      - name: Test clang-format
+        run: clang-format --version
+      - name: Test node
+        run: node --version
+      - name: Test docs ci
+        run: cd docs && npm ci
+      - name: Test docs lint
+        run: cd docs && npm run lint
+      - name: Test docs prettier check
+        run: cd docs && npm run prettier:check
+      - name: Test docs start (webpack-dev-server)
+        run: cd docs && timeout -s SIGINT 20 npm run start &
+      - run: sleep 15
+      - name: Test docs wget (webpack-dev-server)
+        run: wget http://localhost:3000
+      - run: sleep 10
+      - name: Test docs build (webpack)
+        run: cd docs && npm run build
+      - name: Test docs serve (webpack)
+        run: cd docs && timeout -s SIGINT 10 npm run serve &
+      - run: sleep 5
+      - name: Test docs wget (webpack)
+        run: wget http://localhost:3000
+      - name: Test less
+        run: less --version
+      - name: Test PAGER
+        run: pager --version && [[ $PAGER = "less" ]] && true || false
+      - name: Test ssh
+        run: ssh -V
+      - name: Test gdb
+        run: gdb --version
+      - name: Test arm-zephyr-eabi-gdb
+        if: ${{ matrix.architecture == 'arm' }}
+        run: /opt/zephyr-sdk-${ZEPHYR_SDK_VERSION}/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb --version
+      - name: Test tio
+        run: tio --version
+      - name: Test socat
+        run: socat -V
+      - name: Stop container
+        shell: bash
+        run: docker stop candidate
+      - name: Push candidate images to the registry
+        if: ${{ steps.docker-hub-login.outcome == 'success' }}
+        shell: bash
+        run: |
+          docker image push ${{ steps.paths.outputs.build-candidate }}
+          docker image push ${{ steps.paths.outputs.build-branch }}
+          docker image push ${{ steps.paths.outputs.dev-candidate }}
+          docker image push ${{ steps.paths.outputs.dev-branch }}
+  release-trigger:
+    if: ${{ startsWith(github.ref, 'refs/tags') }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.match.outputs.tag }}
+      branch: ${{ steps.match.outputs.branch }}
+      datetime: ${{ steps.match.outputs.datetime }}
+      date: ${{ steps.match.outputs.date }}
+      year: ${{ steps.match.outputs.year }}
+      month: ${{ steps.match.outputs.month }}
+      day: ${{ steps.match.outputs.day }}
+      time: ${{ steps.match.outputs.time }}
+      hour: ${{ steps.match.outputs.hour }}
+      minute: ${{ steps.match.outputs.minute }}
+      second: ${{ steps.match.outputs.second }}
+      zephyr-version: ${{ steps.match.outputs.zephyr-version }}
+      zephyr-version-major: ${{ steps.match.outputs.zephyr-version-major }}
+      zephyr-version-minor: ${{ steps.match.outputs.zephyr-version-minor }}
+      zephyr-version-patch: ${{ steps.match.outputs.zephyr-version-patch }}
+      zephyr-sdk-version: ${{ steps.match.outputs.zephyr-sdk-version }}
+      zephyr-sdk-version-major: ${{ steps.match.outputs.zephyr-sdk-version-major }}
+      zephyr-sdk-version-minor: ${{ steps.match.outputs.zephyr-sdk-version-minor }}
+      zephyr-sdk-version-patch: ${{ steps.match.outputs.zephyr-sdk-version-patch }}
+      sha: ${{ steps.match.outputs.sha }}
+      run-id: ${{ steps.match.outputs.run-id }}
+    steps:
+      - name: Is tag a release trigger?
+        id: match
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          PATTERN="^(.+?)-((([0-9]{4})(0[1-9]|1[012])(0[1-9]|[12][0-9]|3[01]))(([01]?[0-9]|2[0-3])([0-5][0-9])([0-5][0-9])))-(([0-9]+)\.([0-9]+)\.([0-9]+))-(([0-9]+)\.([0-9]+)\.([0-9]+))-([0-9a-fA-F]+)-([0-9]+)$"
+          if [[ "${TAG}" =~ $PATTERN ]]; then
+            echo ::set-output name=tag::${TAG}
+            echo ::set-output name=branch::${BASH_REMATCH[1]}
+            echo ::set-output name=datetime::${BASH_REMATCH[2]}
+            echo ::set-output name=date::${BASH_REMATCH[3]}
+            echo ::set-output name=year::${BASH_REMATCH[4]}
+            echo ::set-output name=month::${BASH_REMATCH[5]}
+            echo ::set-output name=day::${BASH_REMATCH[6]}
+            echo ::set-output name=time::${BASH_REMATCH[7]}
+            echo ::set-output name=hour::${BASH_REMATCH[8]}
+            echo ::set-output name=minute::${BASH_REMATCH[9]}
+            echo ::set-output name=second::${BASH_REMATCH[10]}
+            echo ::set-output name=zephyr-version::${BASH_REMATCH[11]}
+            echo ::set-output name=zephyr-version-major::${BASH_REMATCH[12]}
+            echo ::set-output name=zephyr-version-minor::${BASH_REMATCH[13]}
+            echo ::set-output name=zephyr-version-patch::${BASH_REMATCH[14]}
+            echo ::set-output name=zephyr-sdk-version::${BASH_REMATCH[15]}
+            echo ::set-output name=zephyr-sdk-version-major::${BASH_REMATCH[16]}
+            echo ::set-output name=zephyr-sdk-version-minor::${BASH_REMATCH[17]}
+            echo ::set-output name=zephyr-sdk-version-patch::${BASH_REMATCH[18]}
+            SHA=${BASH_REMATCH[19]}
+            echo ::set-output name=sha::${SHA}
+            echo ::set-output name=run-id::${BASH_REMATCH[20]}
+            if [[ "${{ github.sha }}" != ${SHA}* ]]; then
+              echo "Hashes do not match!"
+              echo "${{ github.sha }}"
+              echo "${SHA}"
+              exit 1
+            fi
+          else
+            echo "Tag not recognised, ignoring ..."
+          fi
+  releases:
+    needs:
+      - architectures
+      - tags
+      - release-trigger
+    if: ${{ needs.release-trigger.outputs.sha != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        architecture: ${{ fromJSON(needs.architectures.outputs.json) }}
+        target:
+          - build
+          - dev
+    steps:
+      - name: Login to GitHub Container Registry
+        id: ghcr-login
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USERNAME }}
+          password: ${{ secrets.GHCR_TOKEN }}
+      - name: Login to Docker Hub
+        id: docker-hub-login
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      - name: Release (pull candidate, tag, push)
+        env:
+          DHNS: ${{ env.docker-hub-namespace }}
+          GHCRNS: ${{ env.ghcr-namespace }}
+          TARGET: ${{ matrix.target }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          CANDIDATE: ${{ needs.release-trigger.outputs.tag }}
+          VERSIONS: ${{ needs.tags.outputs.versions }}
+          MAJOR_MINOR: ${{ needs.tags.outputs.major-minor }}
+        run: |
+          REPOSITORY=zmk-${TARGET}-${ARCHITECTURE}
+          
+          docker pull docker.io/${DHNS}/${REPOSITORY}:${CANDIDATE}
+          docker tag docker.io/${DHNS}/${REPOSITORY}:${CANDIDATE} docker.io/${DHNS}/${REPOSITORY}:${VERSIONS}
+          docker tag docker.io/${DHNS}/${REPOSITORY}:${CANDIDATE} docker.io/${DHNS}/${REPOSITORY}:${MAJOR_MINOR}
+          docker tag docker.io/${DHNS}/${REPOSITORY}:${CANDIDATE} ghcr.io/${GHCRNS}/${REPOSITORY}:${CANDIDATE}
+          docker tag docker.io/${DHNS}/${REPOSITORY}:${CANDIDATE} ghcr.io/${GHCRNS}/${REPOSITORY}:${VERSIONS}
+          docker tag docker.io/${DHNS}/${REPOSITORY}:${CANDIDATE} ghcr.io/${GHCRNS}/${REPOSITORY}:${MAJOR_MINOR}
+          docker push docker.io/${DHNS}/${REPOSITORY}:${CANDIDATE}
+          docker push docker.io/${DHNS}/${REPOSITORY}:${VERSIONS}
+          docker push docker.io/${DHNS}/${REPOSITORY}:${MAJOR_MINOR}
+          docker push ghcr.io/${GHCRNS}/${REPOSITORY}:${CANDIDATE}
+          docker push ghcr.io/${GHCRNS}/${REPOSITORY}:${VERSIONS}
+          docker push ghcr.io/${GHCRNS}/${REPOSITORY}:${MAJOR_MINOR}
+  git-tag:
+    needs:
+    - tags
+    - releases
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Tag
+        env:
+          TAG: ${{ needs.tags.outputs.major-minor }}
+        run: |
+          git tag ${TAG}
+          git push -f origin ${TAG}
